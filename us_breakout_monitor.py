@@ -278,7 +278,7 @@ def main() -> int:
         save_state(meta["symbol"], {"last_alert_bar_ts": sig["bar_ts"],
                                     "last_alert_ts": now_ts})
         append_signal({
-            "symbol": sig["symbol"], "signal_ts": sig["bar_ts"] + 900,
+            "symbol": sig["symbol"], "signal_ts": sig["bar_ts"],
             "entry_price": sig["price"], "atr_ratio": round(sig["atr_ratio"], 3),
             "atr_pct": round(sig["atr_pct"], 3),
             "corr": round(sig["corr"], 3) if sig["corr"] is not None else None,
