@@ -155,6 +155,9 @@ def compute_signal(meta, bars, bench_closes, now_ts):
     dt = datetime.fromtimestamp(bar["ts"], tz=NY)
     if dt.hour == 9 and dt.minute == 30:
         return None
+    # 只报当前交易日的柱（跳过隔夜/周末的陈旧柱）
+    if dt.date() != datetime.now(NY).date():
+        return None
     # 收阳
     if bar["close"] <= bar["open"]:
         return None
@@ -275,7 +278,7 @@ def main() -> int:
         save_state(meta["symbol"], {"last_alert_bar_ts": sig["bar_ts"],
                                     "last_alert_ts": now_ts})
         append_signal({
-            "symbol": sig["symbol"], "signal_ts": now_ts,
+            "symbol": sig["symbol"], "signal_ts": sig["bar_ts"] + 900,
             "entry_price": sig["price"], "atr_ratio": round(sig["atr_ratio"], 3),
             "atr_pct": round(sig["atr_pct"], 3),
             "corr": round(sig["corr"], 3) if sig["corr"] is not None else None,
