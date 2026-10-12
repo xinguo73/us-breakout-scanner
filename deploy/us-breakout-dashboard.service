@@ -1,0 +1,15 @@
+[Unit]
+Description=US breakout signal dashboard
+After=network.target
+
+[Service]
+Type=simple
+Environment=HTTP_PROXY=http://127.0.0.1:7897
+Environment=HTTPS_PROXY=http://127.0.0.1:7897
+Environment=ALL_PROXY=http://127.0.0.1:7897
+ExecStart=/home/larryguo/.hermes/hermes-agent/venv/bin/python3 /home/larryguo/Projects/us-breakout-scanner/us_dashboard_server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
