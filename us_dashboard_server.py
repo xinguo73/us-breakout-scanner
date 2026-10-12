@@ -57,6 +57,30 @@ def fetch_quote(symbol):
         return None
 
 
+_INTERVAL_MAP = {"15m": ("5d", "15m"), "1H": ("1mo", "60m"), "1D": ("1y", "1d")}
+
+
+def fetch_ohlcv(symbol, bar, limit=200):
+    """OHLCV list oldest-first, for the K-line chart (Yahoo chart API)."""
+    rng, interval = _INTERVAL_MAP.get(bar, ("1mo", "60m"))
+    try:
+        r = requests.get(f"{YAHOO_CHART}/{symbol}",
+                         params={"range": rng, "interval": interval}, headers=UA, timeout=15)
+        res = r.json()["chart"]["result"][0]
+        ts = res.get("timestamp") or []
+        q = (res.get("indicators", {}).get("quote") or [{}])[0]
+        out = []
+        for i, t in enumerate(ts):
+            o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
+            if o is None or h is None or l is None or c is None:
+                continue
+            out.append({"time": int(t), "open": float(o), "high": float(h),
+                        "low": float(l), "close": float(c)})
+        return out[-limit:]
+    except Exception:
+        return []
+
+
 def refresh_ledger(ledger):
     changed = False
     for sig in ledger["signals"]:
@@ -109,7 +133,7 @@ def fmt_corr(corr):
 def _row(sig):
     corr = sig.get("corr")
     cells = [
-        f'<td class="sym">{sig["symbol"]}</td>',
+        f'<td class="sym">{sig["symbol"]} <span class="kl">K线▸</span></td>',
         f'<td>{fmt_cst(sig["signal_ts"])}</td>',
         f'<td class="num">{fmt_price(sig["entry_price"])}</td>',
         f'<td class="num">{fmt_price(sig.get("last_price"))}</td>',
@@ -120,7 +144,9 @@ def _row(sig):
         f'<td class="num">{fmt_ret(sig.get("ret_12h"))}</td>',
         f'<td class="num">{fmt_ret(sig.get("ret_now"))}</td>',
     ]
-    return "<tr>" + "".join(cells) + "</tr>"
+    onclick = (f'onclick="openKline(\'{sig["symbol"]}\', {sig["signal_ts"]}, '
+               f'{sig["entry_price"]})"')
+    return f'<tr class="clickable" {onclick}>' + "".join(cells) + "</tr>"
 
 
 def _stats(signals):
@@ -188,9 +214,26 @@ CSS = """
     table { font-size: 12px; }
     th, td { padding: 6px 6px; }
   }
+  tr.clickable { cursor: pointer; }
+  .kl { color: #2f6fed; font-size: 11px; font-weight: normal; }
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.62);
+           z-index: 50; align-items: center; justify-content: center; }
+  .modal-box { background: #0f1420; border: 1px solid #2a3247; border-radius: 10px;
+               width: min(1000px, 94vw); max-height: 90vh; display: flex;
+               flex-direction: column; }
+  .modal-head { display: flex; align-items: center; gap: 12px;
+                padding: 10px 14px; border-bottom: 1px solid #232c40; }
+  #modal-title { font-weight: 600; flex: 1; }
+  .bar-btn { background: #1b2233; color: #aab2c5; border: 1px solid #2a3247;
+             padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .bar-btn.active { background: #2f6fed; color: #fff; border-color: #2f6fed; }
+  .close { background: none; border: none; color: #8b93a7; font-size: 16px; cursor: pointer; }
+  .chart-body { height: 480px; padding: 8px; }
+  .loading { color: #8b93a7; padding: 20px; }
 """
 
 JS = """
+var curSym = null, curBar = '1H', curTs = null, curPrice = null;
 function show(i) {
   var tabs = document.querySelectorAll('.tab');
   var weeks = document.querySelectorAll('.week');
@@ -198,8 +241,136 @@ function show(i) {
   weeks.forEach(function (w, n) { w.style.display = (n === i) ? 'block' : 'none'; });
   try { localStorage.setItem('us_tab', String(i)); } catch (e) {}
 }
+function openKline(sym, ts, price) {
+  curSym = sym; curBar = '1H'; curTs = ts; curPrice = price;
+  document.getElementById('modal').style.display = 'flex';
+  var sig = (ts != null) ? ('信号 ' + fmtT(ts) + ' @ $' + fmtP(price)) : '';
+  document.getElementById('modal-title').textContent = sym + ' ' + sig;
+  syncBarButtons(); loadKline();
+}
+function setBar(bar) { curBar = bar; syncBarButtons(); loadKline(); }
+function syncBarButtons() {
+  var btns = document.querySelectorAll('.bar-btn');
+  for (var i = 0; i < btns.length; i++)
+    btns[i].classList.toggle('active', btns[i].getAttribute('data-bar') === curBar);
+}
+function loadKline() {
+  var body = document.getElementById('chart-body');
+  body.innerHTML = '<div class="loading">加载中…</div>';
+  fetch('/kline?symbol=' + encodeURIComponent(curSym) + '&bar=' + curBar + '&limit=200')
+    .then(function (r) { return r.json(); })
+    .then(function (d) { renderKline(d); })
+    .catch(function (e) { body.textContent = '加载失败: ' + e; });
+}
+function closeModal() { document.getElementById('modal').style.display = 'none'; }
+function fmtP(p) {
+  if (p >= 1000) return p.toFixed(2);
+  return p.toFixed(2);
+}
+function fmtT(ts) {
+  var d = new Date(ts * 1000);
+  var M = ('0' + (d.getMonth() + 1)).slice(-2), D = ('0' + d.getDate()).slice(-2);
+  var h = ('0' + d.getHours()).slice(-2), m = ('0' + d.getMinutes()).slice(-2);
+  return M + '-' + D + ' ' + h + ':' + m;
+}
+function renderKline(data) {
+  var body = document.getElementById('chart-body');
+  body.innerHTML = '';
+  if (!data || !data.length) { body.textContent = '无数据'; return; }
+  var W = 1000, H = 460, padL = 8, padR = 74, padT = 10, padB = 22;
+  var pw = W - padL - padR, ph = H - padT - padB;
+  var lo = Infinity, hi = -Infinity;
+  for (var i = 0; i < data.length; i++) {
+    if (data[i].low < lo) lo = data[i].low;
+    if (data[i].high > hi) hi = data[i].high;
+  }
+  var range = (hi - lo) || 1;
+  var n = data.length, step = pw / n, bw = Math.max(1, step * 0.62);
+  function y(p) { return padT + (hi - p) / range * ph; }
+  function x(i) { return padL + i * step + step / 2; }
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.setAttribute('width', '100%'); svg.setAttribute('height', '100%');
+  svg.style.display = 'block';
+  for (var g = 0; g <= 4; g++) {
+    var p = lo + range * g / 4, gy = y(p);
+    var ln = document.createElementNS(NS, 'line');
+    ln.setAttribute('x1', padL); ln.setAttribute('x2', padL + pw);
+    ln.setAttribute('y1', gy); ln.setAttribute('y2', gy);
+    ln.setAttribute('stroke', '#1f2737'); ln.setAttribute('stroke-width', '1');
+    svg.appendChild(ln);
+    var tx = document.createElementNS(NS, 'text');
+    tx.setAttribute('x', padL + pw + 6); tx.setAttribute('y', gy + 4);
+    tx.setAttribute('fill', '#6b7490'); tx.setAttribute('font-size', '11');
+    tx.textContent = fmtP(p);
+    svg.appendChild(tx);
+  }
+  for (var i = 0; i < n; i++) {
+    var d = data[i], up = d.close >= d.open;
+    var color = up ? '#2ecc71' : '#ff5c5c';
+    var cx = x(i), oy = y(d.open), cy = y(d.close), hy = y(d.high), ly = y(d.low);
+    var wk = document.createElementNS(NS, 'line');
+    wk.setAttribute('x1', cx); wk.setAttribute('x2', cx);
+    wk.setAttribute('y1', hy); wk.setAttribute('y2', ly);
+    wk.setAttribute('stroke', color); wk.setAttribute('stroke-width', '1');
+    svg.appendChild(wk);
+    var top = Math.min(oy, cy), bh = Math.max(1, Math.abs(cy - oy));
+    var rc = document.createElementNS(NS, 'rect');
+    rc.setAttribute('x', cx - bw / 2); rc.setAttribute('y', top);
+    rc.setAttribute('width', bw); rc.setAttribute('height', bh);
+    rc.setAttribute('fill', color);
+    svg.appendChild(rc);
+  }
+  if (curTs != null && curPrice != null && n >= 2) {
+    var t0 = data[0].time, interval = data[1].time - data[0].time;
+    var idx = interval > 0 ? (curTs - t0) / interval : 0;
+    if (idx >= -0.5 && idx <= n + 0.5) {
+      var sx = padL + idx * step + step / 2;
+      sx = Math.max(padL, Math.min(padL + pw, sx));
+      var sy = y(curPrice);
+      var vl = document.createElementNS(NS, 'line');
+      vl.setAttribute('x1', sx); vl.setAttribute('x2', sx);
+      vl.setAttribute('y1', padT); vl.setAttribute('y2', padT + ph);
+      vl.setAttribute('stroke', '#f5c542'); vl.setAttribute('stroke-width', '1.2');
+      vl.setAttribute('stroke-dasharray', '4,4');
+      svg.appendChild(vl);
+      var hl = document.createElementNS(NS, 'line');
+      hl.setAttribute('x1', padL); hl.setAttribute('x2', padL + pw);
+      hl.setAttribute('y1', sy); hl.setAttribute('y2', sy);
+      hl.setAttribute('stroke', '#f5c542'); hl.setAttribute('stroke-width', '1.2');
+      hl.setAttribute('stroke-dasharray', '4,4');
+      svg.appendChild(hl);
+      var dot = document.createElementNS(NS, 'circle');
+      dot.setAttribute('cx', sx); dot.setAttribute('cy', sy);
+      dot.setAttribute('r', '4'); dot.setAttribute('fill', '#f5c542');
+      svg.appendChild(dot);
+      var lb = document.createElementNS(NS, 'text');
+      lb.setAttribute('x', sx + 7); lb.setAttribute('y', sy - 7);
+      lb.setAttribute('fill', '#f5c542'); lb.setAttribute('font-size', '12');
+      lb.setAttribute('font-weight', '600');
+      lb.textContent = '启动信号';
+      svg.appendChild(lb);
+    }
+  }
+  var idxs = [0, Math.floor(n / 2), n - 1];
+  for (var k = 0; k < idxs.length; k++) {
+    var ti = idxs[k];
+    var tt = document.createElementNS(NS, 'text');
+    tt.setAttribute('x', x(ti)); tt.setAttribute('y', H - 6);
+    tt.setAttribute('fill', '#6b7490'); tt.setAttribute('font-size', '11');
+    tt.setAttribute('text-anchor', ti === 0 ? 'start' : (ti === n - 1 ? 'end' : 'middle'));
+    tt.textContent = fmtT(data[ti].time);
+    svg.appendChild(tt);
+  }
+  body.appendChild(svg);
+}
 try { var _t = parseInt(localStorage.getItem('us_tab') || '0', 10); show(_t); } catch (e) {}
-setInterval(function () { location.reload(); }, 60000);
+setInterval(function () {
+  var m = document.getElementById('modal');
+  if (m && m.style.display === 'flex') return;
+  location.reload();
+}, 60000);
 """
 
 
@@ -245,6 +416,18 @@ def render_html(ledger):
 {stats}
 {tabs}
 {sections}
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="modal-title"></span>
+      <button class="bar-btn active" data-bar="1H" onclick="setBar('1H')">1H</button>
+      <button class="bar-btn" data-bar="15m" onclick="setBar('15m')">15m</button>
+      <button class="bar-btn" data-bar="1D" onclick="setBar('1D')">1D</button>
+      <button class="close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="chart-body" id="chart-body"></div>
+  </div>
+</div>
 <script>{JS}</script>
 </body>
 </html>"""
@@ -256,6 +439,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health":
             self._reply(200, "ok", "text/plain")
             return
+        if path == "/kline":
+            self._serve_kline()
+            return
         ledger = load_ledger()
         now = time.time()
         if _CACHE["html"] is None or now - _CACHE["ts"] > REFRESH_INTERVAL:
@@ -265,6 +451,22 @@ class Handler(BaseHTTPRequestHandler):
             _CACHE["html"] = render_html(ledger)
             _CACHE["ts"] = now
         self._reply(200, _CACHE["html"], "text/html; charset=utf-8")
+
+    def _serve_kline(self):
+        q = parse_qs(urlparse(self.path).query)
+        symbol = (q.get("symbol") or [""])[0].strip().upper()
+        bar = (q.get("bar") or ["1H"])[0]
+        try:
+            limit = min(int((q.get("limit") or ["200"])[0]), 500)
+        except ValueError:
+            limit = 200
+        if not symbol or not symbol.replace("-", "").replace(".", "").isalnum():
+            self._reply(400, "bad symbol", "text/plain")
+            return
+        if bar not in ("15m", "1H", "1D"):
+            bar = "1H"
+        data = fetch_ohlcv(symbol, bar, limit)
+        self._reply(200, json.dumps(data), "application/json; charset=utf-8")
 
     def _reply(self, code, body, ctype):
         data = body.encode("utf-8")
