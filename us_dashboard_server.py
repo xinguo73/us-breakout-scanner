@@ -8,9 +8,10 @@ Pure stdlib + requests.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -278,8 +279,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    srv = HTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"us-breakout dashboard on http://127.0.0.1:{PORT}")
+    host = os.environ.get("US_DASHBOARD_HOST", "0.0.0.0")
+    srv = ThreadingHTTPServer((host, PORT), Handler)
+    print(f"us-breakout dashboard on http://{host}:{PORT}")
     srv.serve_forever()
 
 
